@@ -1217,7 +1217,9 @@
       relayStore.showToast(dispatchedUnknown ? `${detail} Check the terminal before sending again.` : detail, true);
     } finally {
       sendingPrompt = false;
-      setTimeout(() => relayStore.readPane(agent), 500);
+      setTimeout(() => {
+        if (componentMounted) relayStore.readPane(agent);
+      }, 500);
     }
   }
 
@@ -1237,7 +1239,9 @@
       relayStore.showToast(message, true);
     } finally {
       sendingSecret = false;
-      setTimeout(() => relayStore.readPane(agent), 500);
+      setTimeout(() => {
+        if (componentMounted) relayStore.readPane(agent);
+      }, 500);
     }
   }
 

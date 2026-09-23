@@ -1773,7 +1773,8 @@ class RelayStore {
   }
 
 
-  private agentTargetPayload(agent: Agent): { target: FrontendTargetRef; server_session_id: string } | null {
+  private agentTargetPayload(agent: Agent | null | undefined): { target: FrontendTargetRef; server_session_id: string } | null {
+    if (!agent) return null;
     const target = targetRefForAgent(agent);
     return target ? { target, server_session_id: target.server_session_id } : null;
   }
@@ -2284,11 +2285,13 @@ class RelayStore {
   }
 
   watchPane(agent: Agent): void {
+    if (!agent) return;
     this.watchedPanes.set(agent.pane_id, agent);
     this.startPaneWatch(agent.pane_id);
   }
 
   unwatchPane(agent: Agent): void {
+    if (!agent) return;
     this.watchedPanes.delete(agent.pane_id);
     this.paneWatchesStarted.delete(agent.pane_id);
     const connection = this.connectionsValue.get(agent.relay_id);
@@ -2685,6 +2688,7 @@ class RelayStore {
   }
 
   async loadSlashCommands(agent: Agent): Promise<SlashCommandCatalog> {
+    if (!agent) throw new CommandError('This agent no longer has an exact terminal identity');
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('slash_commands')) {
       throw new CommandError('This relay does not provide slash-command suggestions.');

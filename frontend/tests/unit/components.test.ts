@@ -110,6 +110,38 @@ describe('accessible Svelte interactions', () => {
     vi.restoreAllMocks();
   });
 
+  it('does not re-read the pane after it unmounts mid prompt submission', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p3', pane_id: 'fedora::w1:p3',
+      project: 'relay', agent: 'omo', status: 'working', cwd: '/home/test/relay',
+    };
+    const read = vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    let resolveSend!: (result: CommandResult) => void;
+    vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise((resolve) => { resolveSend = resolve; }));
+    const { unmount } = render(TerminalView, {
+      agent,
+      allAgents: [agent],
+      frame: { paneId: agent.pane_id, content: 'ready', format: 'plain' },
+      responding: new Set<string>(),
+    });
+    await user.type(screen.getByRole('combobox', { name: 'Prompt' }), 'hello');
+    await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+    vi.useFakeTimers();
+    try {
+      unmount();
+      read.mockClear();
+      resolveSend({ type: 'command_result', request_id: 'prompt-1', ok: true });
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0));
+      vi.runOnlyPendingTimers();
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
+
   it('opens agents and submits approval buttons by role', async () => {
     const user = userEvent.setup();
     const onopen = vi.fn();
