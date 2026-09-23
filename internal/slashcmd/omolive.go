@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -26,6 +27,19 @@ type omoCommandRow struct {
 	Description string `json:"description"`
 	Source      string `json:"source"`
 	Syntax      string `json:"syntax"`
+	SourceInfo  struct {
+		Scope string `json:"scope"`
+	} `json:"sourceInfo"`
+}
+
+// wireSource maps an omo row onto the palette's source enum
+// (builtin | personal | project). Project-scoped resources are project rows;
+// everything else the user installed is personal.
+func wireSource(row omoCommandRow) string {
+	if row.SourceInfo.Scope == "project" {
+		return "project"
+	}
+	return "personal"
 }
 
 type omoGetCommandsResponse struct {
@@ -44,41 +58,54 @@ func parseOMOGetCommands(output []byte) ([]Command, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLiveOutput)
 	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 || line[0] != '{' {
-			continue
+		commands, matched, err := parseOMOGetCommandsLine(scanner.Bytes())
+		if matched {
+			return commands, err
 		}
-		var response omoGetCommandsResponse
-		if json.Unmarshal(line, &response) != nil {
-			continue
-		}
-		if response.Type != "response" || response.Command != "get_commands" {
-			continue
-		}
-		if !response.Success {
-			return nil, errors.New("omo get_commands failed")
-		}
-		commands := make([]Command, 0, len(response.Data.Commands))
-		for _, row := range response.Data.Commands {
-			if row.Syntax != "slash" || (row.Source != "extension" && row.Source != "prompt") {
-				continue
-			}
-			if !commandNamePattern.MatchString(row.Name) {
-				continue
-			}
-			description := compact(row.Description, 240)
-			if description == "" {
-				description = "/" + row.Name
-			}
-			commands = append(commands, Command{
-				Command:     "/" + row.Name,
-				Description: description,
-				Source:      row.Source,
-			})
-		}
-		return commands, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return nil, errors.New("omo get_commands response not found")
+}
+
+// parseOMOGetCommandsLine reports matched=true only for a line that parses as
+// the get_commands response; every other line (events, acks, echoes, logs) is
+// skipped so the caller keeps reading.
+func parseOMOGetCommandsLine(raw []byte) ([]Command, bool, error) {
+	line := bytes.TrimSpace(raw)
+	if len(line) == 0 || line[0] != '{' {
+		return nil, false, nil
+	}
+	var response omoGetCommandsResponse
+	if json.Unmarshal(line, &response) != nil {
+		return nil, false, nil
+	}
+	if response.Type != "response" || response.Command != "get_commands" {
+		return nil, false, nil
+	}
+	if !response.Success {
+		return nil, true, errors.New("omo get_commands failed")
+	}
+	commands := make([]Command, 0, len(response.Data.Commands))
+	for _, row := range response.Data.Commands {
+		if row.Syntax != "slash" || (row.Source != "extension" && row.Source != "prompt") {
+			continue
+		}
+		if !commandNamePattern.MatchString(row.Name) {
+			continue
+		}
+		description := compact(row.Description, 240)
+		if description == "" {
+			description = "/" + row.Name
+		}
+		commands = append(commands, Command{
+			Command:     "/" + row.Name,
+			Description: description,
+			Source:      wireSource(row),
+		})
+	}
+	return commands, true, nil
 }
 
 // MergeLiveCommands appends live rows that the catalog does not already hold.
@@ -112,35 +139,93 @@ type liveEntry struct {
 	expires  time.Time
 }
 
-// LiveCommandCache keeps one successful live listing per working directory.
-// Failures are not cached so the next palette open retries.
+type liveCall struct {
+	done     chan struct{}
+	commands []Command
+	waiters  int
+}
+
+// LiveCommandCache keeps one live listing per working directory. Concurrent
+// requests for the same cwd share one fetch, and a failure is remembered for
+// failureTTL so a hung omo cannot spawn one process per palette request.
 type LiveCommandCache struct {
-	ttl     time.Duration
-	fetch   LiveCommandFetcher
-	mu      sync.Mutex
-	entries map[string]liveEntry
+	ttl        time.Duration
+	failureTTL time.Duration
+	fetch      LiveCommandFetcher
+	onError    func(cwd string, err error)
+	mu         sync.Mutex
+	entries    map[string]liveEntry
+	inflight   map[string]*liveCall
 }
 
-func NewLiveCommandCache(ttl time.Duration, fetch LiveCommandFetcher) *LiveCommandCache {
-	return &LiveCommandCache{ttl: ttl, fetch: fetch, entries: make(map[string]liveEntry)}
+func NewLiveCommandCache(ttl, failureTTL time.Duration, fetch LiveCommandFetcher) *LiveCommandCache {
+	return &LiveCommandCache{
+		ttl:        ttl,
+		failureTTL: failureTTL,
+		fetch:      fetch,
+		entries:    make(map[string]liveEntry),
+		inflight:   make(map[string]*liveCall),
+	}
 }
 
+// OnError registers a callback for failed fetches, called once per fetch.
+func (c *LiveCommandCache) OnError(callback func(cwd string, err error)) {
+	c.mu.Lock()
+	c.onError = callback
+	c.mu.Unlock()
+}
+
+// Get returns the cached or freshly fetched commands for cwd, or nil when the
+// listing is unavailable. A caller that joins an in-flight fetch returns when
+// that fetch finishes or its own ctx ends, whichever is first.
 func (c *LiveCommandCache) Get(ctx context.Context, cwd string) []Command {
 	c.mu.Lock()
 	if entry, ok := c.entries[cwd]; ok && time.Now().Before(entry.expires) {
 		c.mu.Unlock()
 		return entry.commands
 	}
+	if call, ok := c.inflight[cwd]; ok {
+		call.waiters++
+		c.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.commands
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	call := &liveCall{done: make(chan struct{})}
+	c.inflight[cwd] = call
 	c.mu.Unlock()
 
 	commands, err := c.fetch(ctx, cwd)
-	if err != nil {
-		return nil
-	}
+
 	c.mu.Lock()
-	c.entries[cwd] = liveEntry{commands: commands, expires: time.Now().Add(c.ttl)}
+	delete(c.inflight, cwd)
+	onError := c.onError
+	if err != nil {
+		commands = nil
+		c.entries[cwd] = liveEntry{expires: time.Now().Add(c.failureTTL)}
+	} else {
+		c.entries[cwd] = liveEntry{commands: commands, expires: time.Now().Add(c.ttl)}
+	}
+	call.commands = commands
+	close(call.done)
 	c.mu.Unlock()
+	if err != nil && onError != nil {
+		onError(cwd, err)
+	}
 	return commands
+}
+
+// waiters is a test hook reporting how many callers joined cwd's in-flight fetch.
+func (c *LiveCommandCache) waiters(cwd string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if call, ok := c.inflight[cwd]; ok {
+		return call.waiters
+	}
+	return 0
 }
 
 // OMORPCFetcher runs `<omo> --mode rpc --no-session` in cwd, sends one
@@ -180,14 +265,16 @@ func OMORPCFetcher(binary string, timeout time.Duration) LiveCommandFetcher {
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 64*1024), maxLiveOutput)
 		for scanner.Scan() {
-			line := scanner.Bytes()
-			if !bytes.Contains(line, []byte(`"get_commands"`)) {
-				continue
+			commands, matched, err := parseOMOGetCommandsLine(scanner.Bytes())
+			if matched {
+				return commands, err
 			}
-			return parseOMOGetCommands(append(append([]byte(nil), line...), '\n'))
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("read omo output: %w", err)
 		}
 		return nil, errors.New("omo exited without a get_commands response")
 	}

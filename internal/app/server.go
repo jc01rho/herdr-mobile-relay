@@ -1037,7 +1037,7 @@ func (s *Server) Run(ctx context.Context) error {
 				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
 			)
 			if !suppressNative && isOMOAgent(agent) {
-				catalog = slashcmd.MergeLiveCommands(catalog, s.omoLiveCommands(profileID, cwd))
+				catalog = slashcmd.MergeLiveCommands(catalog, s.omoLiveCommands(commandCtx, profileID, cwd))
 			}
 			if s.state.Generation(paneID) != generation {
 				s.sendCommandResult(
@@ -2183,19 +2183,32 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 // extension installed mid-session appears on the next palette open after it.
 const omoLiveCommandTTL = 2 * time.Minute
 
-// omoLiveCommandTimeout bounds one `omo --mode rpc` listing.
-const omoLiveCommandTimeout = 8 * time.Second
+// omoLiveCommandFailureTTL stops a broken or hung omo from being respawned on
+// every palette open.
+const omoLiveCommandFailureTTL = 30 * time.Second
+
+// omoLiveCommandTimeout bounds one `omo --mode rpc` listing. A healthy listing
+// takes about 1.5s; the budget keeps the whole list_slash_commands handler,
+// including the cold agent-version probe, inside the phone's 10s deadline.
+const omoLiveCommandTimeout = 4 * time.Second
 
 func isOMOAgent(agent string) bool {
 	agent = strings.ToLower(strings.TrimSpace(agent))
 	return agent == "omo" || strings.HasPrefix(agent, "omo-")
 }
 
+// isOMOBinary guards against a profile alias that resolves an omo pane to a
+// different agent's executable, which must never receive omo's RPC flags.
+func isOMOBinary(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	return name == "omo" || strings.HasPrefix(name, "omo-") || strings.HasPrefix(name, "omo.")
+}
+
 // omoLiveCommands returns the extension and prompt commands the pane's omo
 // binary registers at runtime, or nil when the listing is unavailable.
-func (s *Server) omoLiveCommands(profileID, cwd string) []slashcmd.Command {
+func (s *Server) omoLiveCommands(ctx context.Context, profileID, cwd string) []slashcmd.Command {
 	profile, ok := s.profiles.Profile(profileID)
-	if !ok || len(profile.Argv) == 0 {
+	if !ok || len(profile.Argv) == 0 || !isOMOBinary(profile.Argv[0]) {
 		return nil
 	}
 	binary := profile.Argv[0]
@@ -2205,11 +2218,18 @@ func (s *Server) omoLiveCommands(profileID, cwd string) []slashcmd.Command {
 	}
 	cache, exists := s.omoCommands[binary]
 	if !exists {
-		cache = slashcmd.NewLiveCommandCache(omoLiveCommandTTL, slashcmd.OMORPCFetcher(binary, omoLiveCommandTimeout))
+		cache = slashcmd.NewLiveCommandCache(
+			omoLiveCommandTTL,
+			omoLiveCommandFailureTTL,
+			slashcmd.OMORPCFetcher(binary, omoLiveCommandTimeout),
+		)
+		cache.OnError(func(cwd string, err error) {
+			s.logger.Warn("omo live slash commands unavailable", "binary", binary, "cwd", cwd, "error", err)
+		})
 		s.omoCommands[binary] = cache
 	}
 	s.omoCommandsMu.Unlock()
-	return cache.Get(context.Background(), cwd)
+	return cache.Get(ctx, cwd)
 }
 
 func locatedAgentDir(home, agent string, location conversation.Location) string {
