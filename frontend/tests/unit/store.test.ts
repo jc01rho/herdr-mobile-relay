@@ -5,7 +5,7 @@ import { BrowserDeviceCredentialStore } from '$lib/device-auth';
 import { setTerminalHistoryLines, setTerminalRefreshInterval } from '$lib/preferences';
 import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
-import type { RelayConfig, RelayWorkspace } from '$lib/types';
+import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
@@ -665,6 +665,30 @@ describe('relay command store', () => {
     });
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(approval).resolves.toBe(true);
+  });
+
+  it('ignores a vanished agent instead of throwing from pane and command calls', async () => {
+    // A TerminalView timer can fire after its agent prop became null (the
+    // parent unmounted it), so every agent-targeted store entry point must
+    // tolerate a missing agent.
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
+      capabilities: ['pane_realtime_delta'], agent_profiles: [],
+    });
+    const gone = null as unknown as Agent;
+    const sentBefore = socket.sent.length;
+
+    expect(() => relayStore.readPane(gone)).not.toThrow();
+    expect(() => relayStore.readPane(gone, true)).not.toThrow();
+    expect(() => relayStore.watchPane(gone)).not.toThrow();
+    expect(() => relayStore.unwatchPane(gone)).not.toThrow();
+    await expect(relayStore.sendToAgent(gone, { type: 'submit_prompt', text: 'hi' }))
+      .rejects.toThrow('This agent no longer has an exact terminal identity');
+    await expect(relayStore.loadSlashCommands(gone))
+      .rejects.toThrow('This agent no longer has an exact terminal identity');
+    expect(socket.sent.length).toBe(sentBefore);
   });
 
   it('does not let an old pane generation suppress a replacement read', () => {

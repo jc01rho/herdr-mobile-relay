@@ -73,7 +73,10 @@ import { constants, gzipSync } from 'node:zlib';
 // reload recovery, and public release descriptor checks in 0.20.10.
 // Add a small fixed allowance for the load-failure and hung-metadata recovery
 // guards; keep the ceiling close enough to catch accidental bootstrap growth.
-const limitKiB = 160;
+// Raised from 160 KiB for the vanished-agent guards: continuations that outlive
+// the terminal view read the last known agent instead of a nulled prop, adding
+// 86 B gzip to a baseline that sat 33 B under the old ceiling.
+const limitKiB = 161;
 const limit = limitKiB * 1024 + 256;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));

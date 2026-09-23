@@ -79,6 +79,15 @@
     readOnly?: boolean;
   } = $props();
 
+  // The parent renders this view under {#if activeAgent}, so when the agent
+  // leaves the inventory Svelte tears the view down and hands pending async
+  // work a null `agent` prop. Continuations that can outlive the view read this
+  // last known agent instead of the prop.
+  let lastAgent: Agent = untrack(() => agent);
+  $effect.pre(() => {
+    if (agent) lastAgent = agent;
+  });
+
   interface VirtualTerminalAnchor {
     index: number;
     offset: number;
@@ -675,7 +684,7 @@
       if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
       if (keyReadTimer) clearTimeout(keyReadTimer);
       for (const command of keyQueue.splice(0)) command.resolve(false);
-      relayStore.unwatchPane(agent);
+      relayStore.unwatchPane(lastAgent);
       releasePaneSizeLease(false);
       virtualRowObserver?.disconnect();
       if (virtualWindowFrame) cancelAnimationFrame(virtualWindowFrame);
@@ -1217,7 +1226,9 @@
       relayStore.showToast(dispatchedUnknown ? `${detail} Check the terminal before sending again.` : detail, true);
     } finally {
       sendingPrompt = false;
-      setTimeout(() => relayStore.readPane(agent), 500);
+      setTimeout(() => {
+        if (componentMounted) relayStore.readPane(agent);
+      }, 500);
     }
   }
 
@@ -1237,7 +1248,9 @@
       relayStore.showToast(message, true);
     } finally {
       sendingSecret = false;
-      setTimeout(() => relayStore.readPane(agent), 500);
+      setTimeout(() => {
+        if (componentMounted) relayStore.readPane(agent);
+      }, 500);
     }
   }
 
@@ -1371,10 +1384,11 @@
    * `haltOnCopyFailure` returns the relay's failure without a fallback.
    */
   async function latestAgentResponse(haltOnCopyFailure = false): Promise<AgentResponseSource> {
+    const target = lastAgent;
     let failure = '';
     if (!readOnly && agentResponseCopySupported) {
       try {
-        const result = await relayStore.sendToAgent(agent, { type: 'copy_agent_response' }, 15_000);
+        const result = await relayStore.sendToAgent(target, { type: 'copy_agent_response' }, 15_000);
         const text = String(result.data?.text || '');
         if (text.trim()) return { text, exact: true, failure: '' };
       } catch (error) {
@@ -1382,9 +1396,9 @@
         if (haltOnCopyFailure) return { text: '', exact: false, failure };
       }
     }
-    if (agent.conversation_history_available) {
+    if (target.conversation_history_available) {
       try {
-        const page = await relayStore.getConversationHistory(agent, '', 8);
+        const page = await relayStore.getConversationHistory(target, '', 8);
         const latest = page.entries.findLast((entry) => entry.role === 'assistant' && entry.text.trim());
         if (latest) return { text: latest.text, exact: true, failure: '' };
       } catch (error) {
@@ -1411,11 +1425,12 @@
     // survive the await, and audio started after it is autoplay-blocked.
     armSpeechKeepalive(toast);
     fetchingSpeechText = true;
+    const target = lastAgent;
     try {
       const { text, failure } = await latestAgentResponse();
       const spoke = text.trim() && speakViaRelay(
         text,
-        (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
+        (chunk, language) => relayStore.speakToAgent(target, chunk, language),
         toast,
       );
       if (!spoke) {
@@ -1747,7 +1762,7 @@
   }
 
   function requestPaneSizeLease(force: boolean) {
-    const target = agent;
+    const target = lastAgent;
     // A hidden page renews only within the grace window: after it, the
     // relay's lease TTL returns the desktop size, and the refocus handler
     // re-leases the moment the page is visible again.
@@ -1785,7 +1800,7 @@
       while (queuedLease) {
         const request = queuedLease;
         queuedLease = null;
-        const target = agent;
+        const target = lastAgent;
         if (!paneSizeLeaseSupported(target)) continue;
         if (!request.force
           && leaseTarget?.pane_id === target.pane_id
@@ -1874,7 +1889,7 @@
           releaseAttachmentController(previous, true);
         }
       }
-      controller = relayStore.attachmentController(agent);
+      controller = relayStore.attachmentController(lastAgent);
       attachmentController = controller;
       attachmentUnsubscribe?.();
       attachmentUnsubscribe = controller.subscribe((snapshot) => {

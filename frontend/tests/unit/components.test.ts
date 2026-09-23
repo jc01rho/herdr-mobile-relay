@@ -8,6 +8,7 @@ import ActivityView from '$components/ActivityView.svelte';
 import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import LaunchView from '$components/LaunchView.svelte';
+import VanishingTerminal from './fixtures/VanishingTerminal.svelte';
 import { relayStore } from '$lib/store';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { setHomeLayout } from '$lib/preferences';
@@ -108,6 +109,73 @@ describe('accessible Svelte interactions', () => {
       type: 'submit_prompt', text: '/plan Review the migration',
     });
     vi.restoreAllMocks();
+  });
+
+  it('does not re-read a vanished pane after a prompt submission settles', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p3', pane_id: 'fedora::w1:p3',
+      project: 'relay', agent: 'omo', status: 'working', cwd: '/home/test/relay',
+    };
+    const read = vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    let resolveSend!: (result: CommandResult) => void;
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise((resolve) => { resolveSend = resolve; }));
+    const view = render(VanishingTerminal, { active: agent });
+    await user.type(screen.getByRole('combobox', { name: 'Prompt' }), 'hello');
+    await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith(agent, { type: 'submit_prompt', text: 'hello' }));
+    vi.useFakeTimers();
+    try {
+      // The parent drops the agent, as App.svelte does when it leaves the inventory.
+      await view.rerender({ active: null });
+      read.mockClear();
+      resolveSend({ type: 'command_result', request_id: 'prompt-1', ok: true });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('keeps Copy working when the agent vanishes during the relay round trip', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p4', pane_id: 'fedora::w1:p4',
+      project: 'relay', agent: 'omp', status: 'idle', cwd: '/home/test/relay',
+      conversation_history_available: true,
+    };
+    // RelayConnection is store-internal; the view reads status and capabilities.
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' }, capabilities: ['agent_response_copy'],
+    } as unknown as RelayConnectionView;
+    relayStore.connections.set(new Map([['fedora', connection as never]]));
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    let resolveCopy!: (result: CommandResult) => void;
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise((resolve) => { resolveCopy = resolve; }));
+    const history = vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
+      entries: [{ role: 'assistant', text: 'Latest answer' }],
+    } as Awaited<ReturnType<typeof relayStore.getConversationHistory>>);
+    const rejections: unknown[] = [];
+    const onRejection = (event: PromiseRejectionEvent) => rejections.push(event.reason);
+    window.addEventListener('unhandledrejection', onRejection);
+    const view = render(VanishingTerminal, { active: agent });
+    try {
+      await user.click(await screen.findByRole('button', { name: /copy/i }));
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(agent, { type: 'copy_agent_response' }, 15_000));
+      await view.rerender({ active: null });
+      await vi.waitFor(() => expect(screen.queryByRole('combobox', { name: 'Prompt' })).not.toBeInTheDocument());
+      resolveCopy({ type: 'command_result', request_id: 'copy-1', ok: true, data: { text: '' } });
+      await vi.waitFor(() => expect(history).toHaveBeenCalledWith(agent, '', 8));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(rejections).toEqual([]);
+    } finally {
+      window.removeEventListener('unhandledrejection', onRejection);
+      relayStore.connections.set(new Map());
+      vi.restoreAllMocks();
+    }
   });
 
   it('opens agents and submits approval buttons by role', async () => {
