@@ -341,6 +341,15 @@ func isQoderAgent(agent string) bool {
 	}
 }
 
+func isTextPasteAgent(agent string) bool {
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case "qoder", "qodercli", "omo", "omo-cli":
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
 	const action = "submit_prompt"
 	text := stringValue(message, "text")
@@ -357,7 +366,7 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 	}
 	requiresEnter := false
 	if agent, ok := d.state.Agent(paneID); ok {
-		requiresEnter = isQoderAgent(agent.Agent)
+		requiresEnter = isTextPasteAgent(agent.Agent)
 	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandPrompt, paneID, commandDeadline, text),

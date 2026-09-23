@@ -272,7 +272,7 @@ func (r *Reader) locate(agent, cwd, sessionID string) Location {
 		return findCodexSession(r.codexRoots(), sessionID)
 	case "pi", "picodingagent":
 		return resolvePathOrSession(r.piRoots(), sessionID, "_")
-	case "omp", "ohmypi":
+	case "omp", "ohmypi", "omo":
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "hermes", "hermesagent":
 		return r.hermes.locate(cwd, sessionID)
@@ -548,7 +548,7 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parseClaudeRecord(record)
 		case "codex", "openaicodex":
 			role, body = parseCodexRecord(record)
-		case "pi", "picodingagent", "omp", "ohmypi":
+		case "pi", "picodingagent", "omp", "ohmypi", "omo":
 			role, body = parsePiRecord(record)
 		}
 		body = sanitizeText(body)
@@ -602,7 +602,7 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 				failed: payload["is_error"] == true,
 			}}
 		}
-	case "pi", "picodingagent", "omp", "ohmypi":
+	case "pi", "picodingagent", "omp", "ohmypi", "omo":
 		if stringValue(record["type"]) != "message" {
 			return nil, nil
 		}

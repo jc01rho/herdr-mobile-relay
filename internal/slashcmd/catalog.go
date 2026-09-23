@@ -42,6 +42,8 @@ func profileIDForAgentName(agent string) string {
 		return "pi"
 	case "omp", "oh my pi", "oh-my-pi":
 		return "omp"
+	case "omo":
+		return "omp"
 	case "kimi", "kimi code", "kimi-code", "kimi-cli":
 		return "kimi"
 	case "opencode", "open code", "open-code":

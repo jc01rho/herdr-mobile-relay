@@ -113,6 +113,7 @@ func Supports(agent string) bool {
 func ompAskAgent(agent string) bool {
 	agent = strings.ToLower(strings.TrimSpace(agent))
 	return agent == "omp" || strings.HasPrefix(agent, "omp-") ||
+		agent == "omo" || strings.HasPrefix(agent, "omo-") ||
 		agent == "pi" || strings.HasPrefix(agent, "pi-") ||
 		strings.Contains(agent, "oh-my-pi")
 }

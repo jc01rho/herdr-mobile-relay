@@ -90,7 +90,7 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 
 func isOMPSessionAgent(agent string) bool {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "omp", "oh-my-pi", "oh my pi", "ohmypi":
+	case "omp", "oh-my-pi", "oh my pi", "ohmypi", "omo":
 		return true
 	default:
 		return false

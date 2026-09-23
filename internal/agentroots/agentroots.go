@@ -226,7 +226,7 @@ func AgentDirForSession(home, agent, sessionPath string) string {
 	switch normalized {
 	case "pi", "picodingagent":
 		roots = Pi(home)
-	case "omp", "ohmypi":
+	case "omp", "ohmypi", "omo":
 		roots = OMP(home)
 	default:
 		return ""
